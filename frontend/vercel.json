@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://3cdtb5v30c.execute-api.ap-south-1.amazonaws.com/:path*"
+    },
+    {
+      "source": "/:code([A-Za-z0-9_-]{8})",
+      "destination": "https://3cdtb5v30c.execute-api.ap-south-1.amazonaws.com/:code"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
