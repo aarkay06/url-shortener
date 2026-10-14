@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: URL shortener API, Lambda functions, and DynamoDB table.
+
+Parameters:
+  PublicShortBaseUrl:
+    Type: String
+    Default: https://aarkay.tech
+    Description: Public domain that short links should use (no trailing slash).
+  FrontendOrigin:
+    Type: String
+    Default: https://aarkay.tech
+    Description: Browser origin allowed to call the API.
+  LinkTtlDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: Number of days a new short link remains valid.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures:
+      - arm64
+    Timeout: 10
+    MemorySize: 128
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref LinksTable
+        LINK_TTL_DAYS: !Ref LinkTtlDays
+    Tracing: Active
+
+Resources:
+  ShortenerApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref FrontendOrigin
+        AllowHeaders:
+          - content-type
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+
+  LinksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: url-shortener-links-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: code
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  CreateLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/createLink.handler
+      Environment:
+        Variables:
+          SHORT_BASE_URL: !Ref PublicShortBaseUrl
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref LinksTable
+      Events:
+        CreateLink:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ShortenerApi
+            Path: /links
+            Method: POST
+
+  RedirectLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/redirectLink.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LinksTable
+      Events:
+        RedirectLink:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ShortenerApi
+            Path: /{code}
+            Method: GET
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the deployed API and generated short links.
+    Value: !Sub "https://${ShortenerApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+  LinksTableName:
+    Value: !Ref LinksTable

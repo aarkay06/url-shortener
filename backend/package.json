@@ -1,0 +1,10 @@
+{
+  "name": "url-shortener-lambdas",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.800.0",
+    "@aws-sdk/lib-dynamodb": "^3.800.0"
+  }
+}
