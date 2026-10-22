@@ -37,6 +37,43 @@ const getBaseUrl = (event) => {
   return null;
 };
 
+const RESERVED_SLUGS = new Set([
+  "links",
+  "api",
+  "health",
+  "favicon.ico",
+  "robots.txt",
+  "static",
+  "admin",
+  "docs",
+]);
+
+function parseCustomSlug(slug) {
+  if (slug == null || slug === "") return { valid: true, slug: null };
+  if (typeof slug !== "string") return { valid: false, error: "Custom slug must be a string" };
+  const trimmed = slug.trim();
+  if (trimmed === "") return { valid: true, slug: null };
+  if (trimmed.length < 3 || trimmed.length > 32) {
+    return { valid: false, error: "Custom slug must be between 3 and 32 characters" };
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+    return { valid: false, error: "Custom slug may only contain letters, numbers, hyphens, and underscores" };
+  }
+  if (RESERVED_SLUGS.has(trimmed.toLowerCase())) {
+    return { valid: false, error: "This custom slug is reserved. Please pick another." };
+  }
+  return { valid: true, slug: trimmed };
+}
+
+function parseTtlDays(input, defaultDays) {
+  if (input == null || input === "") return { valid: true, days: defaultDays };
+  const parsed = Number(input);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
+    return { valid: false, error: "Expiration must be a whole number between 1 and 365 days" };
+  }
+  return { valid: true, days: parsed };
+}
+
 export const handler = async (event) => {
   const baseUrl = getBaseUrl(event);
   if (!tableName || !baseUrl || !Number.isFinite(ttlDays) || ttlDays <= 0) {
@@ -58,8 +95,47 @@ export const handler = async (event) => {
     });
   }
 
+  const slugResult = parseCustomSlug(body?.customSlug ?? body?.slug);
+  if (!slugResult.valid) {
+    return jsonResponse(400, { error: slugResult.error });
+  }
+
+  const ttlResult = parseTtlDays(body?.expiresInDays, ttlDays);
+  if (!ttlResult.valid) {
+    return jsonResponse(400, { error: ttlResult.error });
+  }
+
   const now = Math.floor(Date.now() / 1000);
-  const expiresAt = now + Math.floor(ttlDays * 24 * 60 * 60);
+  const effectiveTtlDays = ttlResult.days;
+  const expiresAt = now + Math.floor(effectiveTtlDays * 24 * 60 * 60);
+
+  // If client requested a custom slug
+  if (slugResult.slug) {
+    const code = slugResult.slug;
+    try {
+      await db.send(new PutCommand({
+        TableName: tableName,
+        Item: { code, longUrl, createdAt: now, expiresAt, isCustom: true },
+        ConditionExpression: "attribute_not_exists(#code)",
+        ExpressionAttributeNames: { "#code": "code" },
+      }));
+
+      return jsonResponse(201, {
+        code,
+        shortUrl: `${baseUrl}/${code}`,
+        expiresAt,
+        createdAt: now,
+      });
+    } catch (error) {
+      if (error.name === "ConditionalCheckFailedException") {
+        return jsonResponse(409, {
+          error: "That custom alias is already taken. Please choose another.",
+        });
+      }
+      console.error("Failed to store custom short link", error);
+      return jsonResponse(500, { error: "Could not create short link" });
+    }
+  }
 
   // The conditional put makes the uniqueness check atomic. Retry only on a real collision.
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -76,6 +152,7 @@ export const handler = async (event) => {
         code,
         shortUrl: `${baseUrl}/${code}`,
         expiresAt,
+        createdAt: now,
       });
     } catch (error) {
       if (error.name === "ConditionalCheckFailedException") continue;

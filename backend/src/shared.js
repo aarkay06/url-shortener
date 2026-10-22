@@ -11,4 +11,4 @@ export const getCodeFromEvent = (event) =>
   event.pathParameters?.code ?? event.pathParameters?.proxy;
 
 export const isValidCode = (code) =>
-  typeof code === "string" && /^[A-Za-z0-9_-]{6,16}$/.test(code);
+  typeof code === "string" && /^[A-Za-z0-9_-]{3,32}$/.test(code);
