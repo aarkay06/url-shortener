@@ -1,21 +1,9 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { getCodeFromEvent, isValidCode, jsonResponse } from "./shared.js";
+import { getCodeFromEvent, isValidCode, jsonResponse, parseDestinationUrl } from "./shared.js";
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const tableName = process.env.TABLE_NAME;
-
-function parseDestination(value) {
-  if (typeof value !== "string" || value.length > 2048) return null;
-  try {
-    const url = new URL(value);
-    if (!["http:", "https:"].includes(url.protocol)) return null;
-    if (url.username || url.password) return null;
-    return url.href;
-  } catch {
-    return null;
-  }
-}
 
 export const handler = async (event) => {
   if (!tableName) {
@@ -62,10 +50,11 @@ export const handler = async (event) => {
     const expValues = {};
 
     if (body?.longUrl !== undefined) {
-      const validUrl = parseDestination(body.longUrl);
-      if (!validUrl) {
-        return jsonResponse(400, { error: "longUrl must be a valid HTTP or HTTPS URL" });
+      const urlResult = parseDestinationUrl(body.longUrl);
+      if (!urlResult.valid) {
+        return jsonResponse(400, { error: urlResult.error });
       }
+      const validUrl = urlResult.url;
       updates.push("#longUrl = :longUrl");
       expNames["#longUrl"] = "longUrl";
       expValues[":longUrl"] = validUrl;

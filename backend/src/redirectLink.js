@@ -1,9 +1,12 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { getCodeFromEvent, isValidCode } from "./shared.js";
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const sqs = new SQSClient({});
 const tableName = process.env.TABLE_NAME;
+const queueUrl = process.env.CLICK_EVENTS_QUEUE_URL;
 
 const response = (statusCode, message) => ({
   statusCode,
@@ -57,50 +60,80 @@ async function recordClick(code, event) {
   const country = parseCountry(headers);
   const now = Math.floor(Date.now() / 1000);
 
-  try {
-    await db.send(new UpdateCommand({
-      TableName: tableName,
-      Key: { code },
-      UpdateExpression: "SET lastClickedAt = :now, devices.#dev = if_not_exists(devices.#dev, :zero) + :one, referrers.#ref = if_not_exists(referrers.#ref, :zero) + :one, countries.#cnt = if_not_exists(countries.#cnt, :zero) + :one ADD clickCount :one",
-      ExpressionAttributeNames: {
-        "#dev": device,
-        "#ref": referrer,
-        "#cnt": country,
-      },
-      ExpressionAttributeValues: {
-        ":now": now,
-        ":zero": 0,
-        ":one": 1,
-      },
-    }));
-  } catch (err) {
-    // Fallback: If map structures were not initialized on earlier items
+  // 1. Hyperscale path: publish lightweight click event to SQS queue
+  if (queueUrl) {
     try {
-      await db.send(new UpdateCommand({
-        TableName: tableName,
-        Key: { code },
-        UpdateExpression: "SET lastClickedAt = :now, devices = if_not_exists(devices, :emptyMap), referrers = if_not_exists(referrers, :emptyMap), countries = if_not_exists(countries, :emptyMap) ADD clickCount :one",
-        ExpressionAttributeValues: {
-          ":now": now,
-          ":one": 1,
-          ":emptyMap": {},
-        },
-      }));
+      await sqs.send(
+        new SendMessageCommand({
+          QueueUrl: queueUrl,
+          MessageBody: JSON.stringify({
+            code,
+            device,
+            referrer,
+            country,
+            timestamp: now,
+          }),
+        })
+      );
+      return;
+    } catch (sqsErr) {
+      console.warn("SQS enqueue failed, falling back to direct DB write", sqsErr);
+    }
+  }
 
-      await db.send(new UpdateCommand({
+  // 2. Direct DB fallback (if queue not available)
+  try {
+    await db.send(
+      new UpdateCommand({
         TableName: tableName,
         Key: { code },
-        UpdateExpression: "SET devices.#dev = if_not_exists(devices.#dev, :zero) + :one, referrers.#ref = if_not_exists(referrers.#ref, :zero) + :one, countries.#cnt = if_not_exists(countries.#cnt, :zero) + :one",
+        UpdateExpression:
+          "SET lastClickedAt = :now, devices.#dev = if_not_exists(devices.#dev, :zero) + :one, referrers.#ref = if_not_exists(referrers.#ref, :zero) + :one, countries.#cnt = if_not_exists(countries.#cnt, :zero) + :one ADD clickCount :one",
         ExpressionAttributeNames: {
           "#dev": device,
           "#ref": referrer,
           "#cnt": country,
         },
         ExpressionAttributeValues: {
+          ":now": now,
           ":zero": 0,
           ":one": 1,
         },
-      }));
+      })
+    );
+  } catch (err) {
+    try {
+      await db.send(
+        new UpdateCommand({
+          TableName: tableName,
+          Key: { code },
+          UpdateExpression:
+            "SET lastClickedAt = :now, devices = if_not_exists(devices, :emptyMap), referrers = if_not_exists(referrers, :emptyMap), countries = if_not_exists(countries, :emptyMap) ADD clickCount :one",
+          ExpressionAttributeValues: {
+            ":now": now,
+            ":one": 1,
+            ":emptyMap": {},
+          },
+        })
+      );
+
+      await db.send(
+        new UpdateCommand({
+          TableName: tableName,
+          Key: { code },
+          UpdateExpression:
+            "SET devices.#dev = if_not_exists(devices.#dev, :zero) + :one, referrers.#ref = if_not_exists(referrers.#ref, :zero) + :one, countries.#cnt = if_not_exists(countries.#cnt, :zero) + :one",
+          ExpressionAttributeNames: {
+            "#dev": device,
+            "#ref": referrer,
+            "#cnt": country,
+          },
+          ExpressionAttributeValues: {
+            ":zero": 0,
+            ":one": 1,
+          },
+        })
+      );
     } catch (fallbackError) {
       console.error("Failed to record click telemetry", fallbackError);
     }
@@ -117,11 +150,13 @@ export const handler = async (event) => {
   if (!isValidCode(code)) return response(404, "Link not found");
 
   try {
-    const result = await db.send(new GetCommand({
-      TableName: tableName,
-      Key: { code },
-      ConsistentRead: true,
-    }));
+    const result = await db.send(
+      new GetCommand({
+        TableName: tableName,
+        Key: { code },
+        ConsistentRead: true,
+      })
+    );
     const item = result.Item;
     if (!item) return response(404, "Link not found");
 
@@ -148,14 +183,15 @@ export const handler = async (event) => {
       return response(500, "Stored link is invalid");
     }
 
-    // Record click analytics asynchronously with safe catch
+    // Record click analytics asynchronously via SQS
     await recordClick(code, event);
 
     return {
       statusCode: 302,
       headers: {
         location: destination.href,
-        "cache-control": "no-store",
+        // Edge CDN caching: 60s cache at PoPs, stale-while-revalidate for sub-15ms edge redirects
+        "cache-control": "public, max-age=60, s-maxage=60, stale-while-revalidate=120",
       },
       body: "",
     };

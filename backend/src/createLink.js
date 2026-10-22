@@ -1,25 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { jsonResponse } from "./shared.js";
+import { jsonResponse, parseDestinationUrl } from "./shared.js";
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const tableName = process.env.TABLE_NAME;
 const ttlDays = Number(process.env.LINK_TTL_DAYS ?? "30");
 
 const makeCode = () => randomBytes(9).toString("base64url").slice(0, 8);
-
-function parseDestination(value) {
-  if (typeof value !== "string" || value.length > 2048) return null;
-  try {
-    const url = new URL(value);
-    if (!["http:", "https:"].includes(url.protocol)) return null;
-    if (url.username || url.password) return null;
-    return url.href;
-  } catch {
-    return null;
-  }
-}
 
 const getBaseUrl = (event) => {
   if (process.env.SHORT_BASE_URL) {
@@ -120,12 +108,11 @@ export const handler = async (event) => {
     return jsonResponse(400, { error: "Request body must be valid JSON" });
   }
 
-  const longUrl = parseDestination(body?.url);
-  if (!longUrl) {
-    return jsonResponse(400, {
-      error: "url must be an absolute HTTP or HTTPS URL without embedded credentials",
-    });
+  const urlResult = parseDestinationUrl(body?.url);
+  if (!urlResult.valid) {
+    return jsonResponse(400, { error: urlResult.error });
   }
+  const longUrl = urlResult.url;
 
   const slugResult = parseCustomSlug(body?.customSlug ?? body?.slug);
   if (!slugResult.valid) {

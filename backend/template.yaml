@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: URL shortener API, Cognito User Pool, Lambda functions, and DynamoDB table.
+Description: URL shortener API, Cognito User Pool, SQS telemetry queue, WAF, Lambda functions, and DynamoDB table.
 
 Parameters:
   PublicShortBaseUrl:
@@ -117,6 +117,14 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
+  # Asynchronous click telemetry queue for hyperscale
+  ClickEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: url-shortener-clicks-dev
+      MessageRetentionPeriod: 86400
+      VisibilityTimeout: 60
+
   CreateLinkFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -141,9 +149,14 @@ Resources:
     Properties:
       CodeUri: .
       Handler: src/redirectLink.handler
+      Environment:
+        Variables:
+          CLICK_EVENTS_QUEUE_URL: !Ref ClickEventsQueue
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref LinksTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ClickEventsQueue.QueueName
       Events:
         RedirectLink:
           Type: HttpApi
@@ -151,6 +164,25 @@ Resources:
             ApiId: !Ref ShortenerApi
             Path: /{code}
             Method: GET
+
+  # Batch processor draining SQS click events into DynamoDB
+  ProcessClickEventsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/processClicks.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksTable
+        - SQSPollerPolicy:
+            QueueName: !GetAtt ClickEventsQueue.QueueName
+      Events:
+        ClickQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ClickEventsQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
 
   GetAnalyticsFunction:
     Type: AWS::Serverless::Function
@@ -222,6 +254,73 @@ Resources:
             Auth:
               Authorizer: CognitoAuthorizer
 
+  # AWS WAF WebACL for DDoS, Bot Protection, and Rate Limiting
+  ApiWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: url-shortener-waf-dev
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: ShortenerApiWebACL
+      Rules:
+        - Name: RateLimitLinkCreation
+          Priority: 1
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitLinkCreation
+          Statement:
+            RateBasedStatement:
+              Limit: 100
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  SearchString: /links
+                  FieldToMatch:
+                    UriPath: {}
+                  TextTransformations:
+                    - Priority: 0
+                      Type: LOWERCASE
+                  PositionalConstraint: STARTS_WITH
+
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+
+        - Name: AWSManagedRulesAmazonIpReputationList
+          Priority: 3
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesAmazonIpReputationList
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+
+  WebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Sub "arn:aws:apigateway:${AWS::Region}::/apis/${ShortenerApi}/stages/$default"
+      WebACLArn: !GetAtt ApiWebACL.Arn
+
 Outputs:
   ApiBaseUrl:
     Description: Base URL for the deployed API and generated short links.
@@ -234,6 +333,12 @@ Outputs:
   UserPoolClientId:
     Description: Cognito App Client ID
     Value: !Ref UserPoolClient
+  ClickEventsQueueUrl:
+    Description: SQS Click Telemetry Queue URL
+    Value: !Ref ClickEventsQueue
+  WebACLArn:
+    Description: AWS WAF WebACL ARN
+    Value: !GetAtt ApiWebACL.Arn
   AwsRegion:
     Description: AWS Region
     Value: !Ref AWS::Region
