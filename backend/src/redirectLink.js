@@ -131,6 +131,10 @@ export const handler = async (event) => {
       return response(410, "Link expired");
     }
 
+    if (item.isPaused) {
+      return response(403, "This link has been paused by its creator.");
+    }
+
     // Treat malformed stored destinations as an internal data error, not a redirect.
     let destination;
     try {

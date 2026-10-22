@@ -74,6 +74,38 @@ function parseTtlDays(input, defaultDays) {
   return { valid: true, days: parsed };
 }
 
+function extractUserFromEvent(event) {
+  const authorizerSub = event.requestContext?.authorizer?.jwt?.claims?.sub;
+  if (authorizerSub) {
+    return {
+      userId: authorizerSub,
+      userEmail: event.requestContext.authorizer.jwt.claims.email || null,
+    };
+  }
+
+  const authHeader = event.headers?.authorization || event.headers?.Authorization;
+  if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+    try {
+      const token = authHeader.slice(7);
+      const parts = token.split(".");
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+        const now = Math.floor(Date.now() / 1000);
+        if (payload?.sub && (!payload.exp || payload.exp > now)) {
+          return {
+            userId: payload.sub,
+            userEmail: payload.email || payload["cognito:username"] || null,
+          };
+        }
+      }
+    } catch {
+      // Ignore invalid token
+    }
+  }
+
+  return { userId: null, userEmail: null };
+}
+
 export const handler = async (event) => {
   const baseUrl = getBaseUrl(event);
   if (!tableName || !baseUrl || !Number.isFinite(ttlDays) || ttlDays <= 0) {
@@ -105,9 +137,21 @@ export const handler = async (event) => {
     return jsonResponse(400, { error: ttlResult.error });
   }
 
+  const user = extractUserFromEvent(event);
   const now = Math.floor(Date.now() / 1000);
   const effectiveTtlDays = ttlResult.days;
   const expiresAt = now + Math.floor(effectiveTtlDays * 24 * 60 * 60);
+
+  const baseItem = {
+    longUrl,
+    createdAt: now,
+    expiresAt,
+    ...(user.userId ? { userId: user.userId, userEmail: user.userEmail } : {}),
+    clickCount: 0,
+    devices: {},
+    referrers: {},
+    countries: {},
+  };
 
   // If client requested a custom slug
   if (slugResult.slug) {
@@ -117,14 +161,8 @@ export const handler = async (event) => {
         TableName: tableName,
         Item: {
           code,
-          longUrl,
-          createdAt: now,
-          expiresAt,
+          ...baseItem,
           isCustom: true,
-          clickCount: 0,
-          devices: {},
-          referrers: {},
-          countries: {},
         },
         ConditionExpression: "attribute_not_exists(#code)",
         ExpressionAttributeNames: { "#code": "code" },
@@ -135,6 +173,7 @@ export const handler = async (event) => {
         shortUrl: `${baseUrl}/${code}`,
         expiresAt,
         createdAt: now,
+        userId: user.userId,
       });
     } catch (error) {
       if (error.name === "ConditionalCheckFailedException") {
@@ -155,13 +194,7 @@ export const handler = async (event) => {
         TableName: tableName,
         Item: {
           code,
-          longUrl,
-          createdAt: now,
-          expiresAt,
-          clickCount: 0,
-          devices: {},
-          referrers: {},
-          countries: {},
+          ...baseItem,
         },
         ConditionExpression: "attribute_not_exists(#code)",
         ExpressionAttributeNames: { "#code": "code" },
@@ -172,6 +205,7 @@ export const handler = async (event) => {
         shortUrl: `${baseUrl}/${code}`,
         expiresAt,
         createdAt: now,
+        userId: user.userId,
       });
     } catch (error) {
       if (error.name === "ConditionalCheckFailedException") continue;

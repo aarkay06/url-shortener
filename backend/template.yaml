@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: URL shortener API, Lambda functions, and DynamoDB table.
+Description: URL shortener API, Cognito User Pool, Lambda functions, and DynamoDB table.
 
 Parameters:
   PublicShortBaseUrl:
@@ -31,6 +31,38 @@ Globals:
     Tracing: Active
 
 Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: url-shortener-users-dev
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: false
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: url-shortener-web-client
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
   ShortenerApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -39,10 +71,21 @@ Resources:
           - !Ref FrontendOrigin
         AllowHeaders:
           - content-type
+          - authorization
         AllowMethods:
           - GET
           - POST
+          - PATCH
+          - DELETE
           - OPTIONS
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+              audience:
+                - !Ref UserPoolClient
+            IdentitySource: "$request.header.Authorization"
 
   LinksTable:
     Type: AWS::DynamoDB::Table
@@ -52,9 +95,22 @@ Resources:
       AttributeDefinitions:
         - AttributeName: code
           AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: N
       KeySchema:
         - AttributeName: code
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: userId-createdAt-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
       TimeToLiveSpecification:
         AttributeName: expiresAt
         Enabled: true
@@ -112,9 +168,72 @@ Resources:
             Path: /links/{code}/analytics
             Method: GET
 
+  ListLinksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/listLinks.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksTable
+      Events:
+        ListLinks:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ShortenerApi
+            Path: /links
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  UpdateLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/updateLink.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksTable
+      Events:
+        UpdateLink:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ShortenerApi
+            Path: /links/{code}
+            Method: PATCH
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DeleteLinkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/deleteLink.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksTable
+      Events:
+        DeleteLink:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ShortenerApi
+            Path: /links/{code}
+            Method: DELETE
+            Auth:
+              Authorizer: CognitoAuthorizer
+
 Outputs:
   ApiBaseUrl:
     Description: Base URL for the deployed API and generated short links.
     Value: !Sub "https://${ShortenerApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
   LinksTableName:
     Value: !Ref LinksTable
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref UserPoolClient
+  AwsRegion:
+    Description: AWS Region
+    Value: !Ref AWS::Region

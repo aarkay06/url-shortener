@@ -1,5 +1,13 @@
 import { useMemo, useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+import {
+  getStoredSession,
+  signIn,
+  signUp,
+  confirmSignUp,
+  resendConfirmationCode,
+  signOut,
+} from './cognito.js';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '');
 const STORAGE_KEY = 'snip_recent_links_v1';
@@ -36,6 +44,12 @@ function Icon({ name, size = 20, strokeWidth = 1.8 }) {
     chart: <><line x1="18" x2="18" y1="20" y2="10" /><line x1="12" x2="12" y1="20" y2="4" /><line x1="6" x2="6" y1="20" y2="14" /></>,
     refresh: <><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21h5v-5" /></>,
     x: <><line x1="18" x2="6" y1="6" y2="18" /><line x1="6" x2="18" y1="6" y2="18" /></>,
+    user: <><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></>,
+    edit: <><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></>,
+    pause: <><rect width="4" height="16" x="6" y="4" /><rect width="4" height="16" x="14" y="4" /></>,
+    play: <polygon points="5 3 19 12 5 21 5 3" />,
+    logOut: <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" x2="9" y1="12" y2="12" /></>,
+    cloud: <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />,
   };
   return <svg {...shared}>{paths[name] || null}</svg>;
 }
@@ -64,6 +78,283 @@ function timeAgo(timestampSec) {
   if (diffHr < 24) return `${diffHr}h ago`;
   const diffDays = Math.floor(diffHr / 24);
   return `${diffDays}d ago`;
+}
+
+function AuthModal({ onClose, onAuthSuccess }) {
+  const [tab, setTab] = useState('signin'); // 'signin' | 'signup' | 'confirm'
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmCode, setConfirmCode] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+
+  const handleSignIn = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const session = await signIn(email, password);
+      onAuthSuccess(session);
+      onClose();
+    } catch (err) {
+      if (err.message.includes('UserNotConfirmedException') || err.message.includes('not confirmed')) {
+        setTab('confirm');
+        setInfo('Please enter the verification code sent to your email.');
+      } else {
+        setError(err.message || 'Failed to sign in.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignUp = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      await signUp(email, password);
+      setTab('confirm');
+      setInfo('We sent a verification code to your email. Enter it below to activate your account.');
+    } catch (err) {
+      setError(err.message || 'Failed to create account.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirm = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      await confirmSignUp(email, confirmCode);
+      const session = await signIn(email, password);
+      onAuthSuccess(session);
+      onClose();
+    } catch (err) {
+      setError(err.message || 'Invalid verification code.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResend = async () => {
+    setError('');
+    try {
+      await resendConfirmationCode(email);
+      setInfo('A new verification code has been dispatched to your email.');
+    } catch (err) {
+      setError(err.message || 'Could not resend code.');
+    }
+  };
+
+  return (
+    <div className="analytics-overlay" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="auth-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="auth-header">
+          <div className="auth-title-group">
+            <span className="analytics-eyebrow">
+              <Icon name="user" size={13} /> CLOUD ACCOUNT
+            </span>
+            <h3 className="auth-modal-title">
+              {tab === 'signin' && 'Welcome Back'}
+              {tab === 'signup' && 'Create Your Account'}
+              {tab === 'confirm' && 'Verify Your Email'}
+            </h3>
+          </div>
+          <button className="analytics-close-btn" onClick={onClose} aria-label="Close">
+            <Icon name="x" size={16} />
+          </button>
+        </div>
+
+        {tab !== 'confirm' && (
+          <div className="auth-tabs">
+            <button
+              type="button"
+              className={`auth-tab ${tab === 'signin' ? 'active' : ''}`}
+              onClick={() => { setTab('signin'); setError(''); }}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              className={`auth-tab ${tab === 'signup' ? 'active' : ''}`}
+              onClick={() => { setTab('signup'); setError(''); }}
+            >
+              Create Account
+            </button>
+          </div>
+        )}
+
+        {info && <p className="auth-info-msg">{info}</p>}
+        {error && <p className="error-message" role="alert">{error}</p>}
+
+        {tab === 'signin' && (
+          <form onSubmit={handleSignIn} className="auth-form">
+            <div className="option-field">
+              <label className="input-label" htmlFor="auth-email">Email Address</label>
+              <input
+                id="auth-email"
+                type="email"
+                className="auth-input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                required
+              />
+            </div>
+            <div className="option-field">
+              <label className="input-label" htmlFor="auth-password">Password</label>
+              <input
+                id="auth-password"
+                type="password"
+                className="auth-input"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Your password"
+                required
+              />
+            </div>
+            <button className="submit-button" type="submit" disabled={loading}>
+              {loading ? <><span className="spinner" /> Signing in…</> : 'Sign In'}
+            </button>
+          </form>
+        )}
+
+        {tab === 'signup' && (
+          <form onSubmit={handleSignUp} className="auth-form">
+            <div className="option-field">
+              <label className="input-label" htmlFor="signup-email">Email Address</label>
+              <input
+                id="signup-email"
+                type="email"
+                className="auth-input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                required
+              />
+            </div>
+            <div className="option-field">
+              <label className="input-label" htmlFor="signup-password">Password (min 8 characters)</label>
+              <input
+                id="signup-password"
+                type="password"
+                className="auth-input"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Choose a strong password"
+                minLength={8}
+                required
+              />
+            </div>
+            <button className="submit-button" type="submit" disabled={loading}>
+              {loading ? <><span className="spinner" /> Creating account…</> : 'Create Free Account'}
+            </button>
+          </form>
+        )}
+
+        {tab === 'confirm' && (
+          <form onSubmit={handleConfirm} className="auth-form">
+            <div className="option-field">
+              <label className="input-label" htmlFor="confirm-code">Verification Code</label>
+              <input
+                id="confirm-code"
+                type="text"
+                className="auth-input mono"
+                value={confirmCode}
+                onChange={(e) => setConfirmCode(e.target.value)}
+                placeholder="123456"
+                required
+              />
+            </div>
+            <button className="submit-button" type="submit" disabled={loading}>
+              {loading ? <><span className="spinner" /> Verifying…</> : 'Verify & Sign In'}
+            </button>
+            <div className="auth-resend-row">
+              <button type="button" className="auth-link-btn" onClick={handleResend}>
+                Didn't get code? Resend
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EditLinkModal({ link, onClose, onUpdated, apiBaseUrl, authSession }) {
+  const [longUrl, setLongUrl] = useState(link.longUrl || '');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleUpdate = async (e) => {
+    e.preventDefault();
+    setError('');
+
+    let parsed;
+    try {
+      parsed = new URL(longUrl.trim());
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
+    } catch {
+      setError('Please provide a valid URL starting with http:// or https://');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch(`${apiBaseUrl}/links/${link.code}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authSession.idToken}`,
+        },
+        body: JSON.stringify({ longUrl: parsed.href }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to update link destination.');
+      onUpdated({ ...link, longUrl: parsed.href });
+      onClose();
+    } catch (err) {
+      setError(err.message || 'Could not update link.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="analytics-overlay" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="auth-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="auth-header">
+          <div className="auth-title-group">
+            <span className="analytics-eyebrow"><Icon name="edit" size={13} /> EDIT DESTINATION</span>
+            <h3 className="auth-modal-title">/{link.code}</h3>
+          </div>
+          <button className="analytics-close-btn" onClick={onClose}><Icon name="x" size={16} /></button>
+        </div>
+        <form onSubmit={handleUpdate} className="auth-form">
+          <div className="option-field">
+            <label className="input-label" htmlFor="edit-url">New Target URL</label>
+            <input
+              id="edit-url"
+              type="url"
+              className="auth-input"
+              value={longUrl}
+              onChange={(e) => setLongUrl(e.target.value)}
+              placeholder="https://new-destination.com"
+              required
+            />
+          </div>
+          {error && <p className="error-message" role="alert">{error}</p>}
+          <button className="submit-button" type="submit" disabled={loading}>
+            {loading ? <><span className="spinner" /> Saving…</> : 'Save New Destination'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 function AnalyticsModal({ code, onClose, apiBaseUrl }) {
@@ -146,7 +437,6 @@ function AnalyticsModal({ code, onClose, apiBaseUrl }) {
 
         {data && !loading && (
           <div className="analytics-body">
-            {/* KPI Cards */}
             <div className="analytics-metrics-grid">
               <div className="metric-card primary">
                 <span className="metric-label">TOTAL CLICKS</span>
@@ -168,7 +458,6 @@ function AnalyticsModal({ code, onClose, apiBaseUrl }) {
               </div>
             </div>
 
-            {/* Target URL Info */}
             {data.longUrl && (
               <div className="analytics-target-box">
                 <span className="target-label">Destination URL:</span>
@@ -179,7 +468,6 @@ function AnalyticsModal({ code, onClose, apiBaseUrl }) {
               </div>
             )}
 
-            {/* Device Distribution */}
             <div className="analytics-section">
               <div className="section-title-row">
                 <span className="section-title">Device Breakdown</span>
@@ -203,7 +491,6 @@ function AnalyticsModal({ code, onClose, apiBaseUrl }) {
               )}
             </div>
 
-            {/* Top Referrers */}
             <div className="analytics-section">
               <span className="section-title">Top Referral Sources</span>
               {topReferrers.length > 0 ? (
@@ -220,7 +507,6 @@ function AnalyticsModal({ code, onClose, apiBaseUrl }) {
               )}
             </div>
 
-            {/* Top Countries */}
             <div className="analytics-section">
               <span className="section-title">Geographic Distribution</span>
               {topCountries.length > 0 ? (
@@ -256,6 +542,15 @@ function App() {
   const [copied, setCopied] = useState(false);
   const [historyCopiedCode, setHistoryCopiedCode] = useState(null);
 
+  // Auth state
+  const [authSession, setAuthSession] = useState(() => getStoredSession());
+  const [showAuthModal, setShowAuthModal] = useState(false);
+
+  // Cloud user links
+  const [cloudLinks, setCloudLinks] = useState([]);
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [editingLink, setEditingLink] = useState(null);
+
   // Active analytics code for modal
   const [analyticsCode, setAnalyticsCode] = useState(null);
 
@@ -272,10 +567,37 @@ function App() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(recentLinks));
-    } catch {
-      // Storage unavailable or quota exceeded
-    }
+    } catch {}
   }, [recentLinks]);
+
+  // Fetch cloud links when user is signed in
+  const fetchCloudLinks = async () => {
+    if (!authSession?.idToken || !API_BASE_URL) return;
+    setCloudLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/links`, {
+        headers: {
+          Authorization: `Bearer ${authSession.idToken}`,
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCloudLinks(data.links || []);
+      }
+    } catch (err) {
+      console.error('Failed to load cloud links', err);
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (authSession) {
+      fetchCloudLinks();
+    } else {
+      setCloudLinks([]);
+    }
+  }, [authSession]);
 
   const domain = useMemo(() => {
     if (!result?.shortUrl) {
@@ -326,9 +648,14 @@ function App() {
         payload.customSlug = customSlug.trim();
       }
 
+      const headers = { 'content-type': 'application/json' };
+      if (authSession?.idToken) {
+        headers.Authorization = `Bearer ${authSession.idToken}`;
+      }
+
       const response = await fetch(`${API_BASE_URL}/links`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify(payload),
       });
       const data = await response.json().catch(() => ({}));
@@ -341,6 +668,10 @@ function App() {
         longUrl: parsed.href,
       };
       setResult(fullResult);
+
+      if (authSession) {
+        fetchCloudLinks();
+      }
 
       // Append to recent links (keep top 6 unique by code)
       setRecentLinks((prev) => {
@@ -394,6 +725,50 @@ function App() {
     img.src = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svgData)))}`;
   }
 
+  const togglePauseLink = async (code, currentPaused) => {
+    if (!authSession?.idToken || !API_BASE_URL) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/links/${code}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authSession.idToken}`,
+        },
+        body: JSON.stringify({ isPaused: !currentPaused }),
+      });
+      if (res.ok) {
+        setCloudLinks((prev) =>
+          prev.map((item) => (item.code === code ? { ...item, isPaused: !currentPaused } : item))
+        );
+      }
+    } catch (err) {
+      console.error('Failed to toggle pause status', err);
+    }
+  };
+
+  const deleteLink = async (code) => {
+    if (!window.confirm(`Are you sure you want to permanently delete /${code}?`)) return;
+    if (!authSession?.idToken || !API_BASE_URL) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/links/${code}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${authSession.idToken}`,
+        },
+      });
+      if (res.ok) {
+        setCloudLinks((prev) => prev.filter((item) => item.code !== code));
+      }
+    } catch (err) {
+      console.error('Failed to delete link', err);
+    }
+  };
+
+  function handleSignOut() {
+    signOut();
+    setAuthSession(null);
+  }
+
   function clearHistory() {
     setRecentLinks([]);
     try { localStorage.removeItem(STORAGE_KEY); } catch {}
@@ -405,10 +780,30 @@ function App() {
       <div className="ambient ambient-two" />
       <header className="topbar">
         <a className="wordmark" href="#top" aria-label="snip home"><BrandMark /><span>snip<span className="wordmark-dot">.</span></span></a>
-        <div className="topbar-note"><span className="status-dot" /> tiny links, big possibilities</div>
-        <a className="topbar-github" href="https://github.com" target="_blank" rel="noreferrer">
-          A little less link <Icon name="arrow" size={15} />
-        </a>
+        
+        <div className="topbar-right">
+          {authSession ? (
+            <div className="user-badge-tray">
+              <span className="user-email-badge" title={authSession.user?.email}>
+                <Icon name="user" size={13} />
+                <span className="email-text">{authSession.user?.email}</span>
+              </span>
+              <button type="button" className="auth-action-btn" onClick={handleSignOut} title="Sign Out">
+                <Icon name="logOut" size={13} />
+                <span>Sign Out</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="topbar-login-btn"
+              onClick={() => setShowAuthModal(true)}
+            >
+              <Icon name="user" size={14} />
+              <span>Sign In / Register</span>
+            </button>
+          )}
+        </div>
       </header>
 
       <main id="top">
@@ -420,7 +815,10 @@ function App() {
           <div className="shortener-card">
             <div className="card-topline">
               <div className="card-label"><span className="label-spark"><Icon name="spark" size={15} /></span> Make it snip</div>
-              <span className="private-note"><Icon name="shield" size={14} /> no account needed</span>
+              <span className="private-note">
+                <Icon name={authSession ? 'cloud' : 'shield'} size={14} />
+                {authSession ? 'syncing to your account' : 'no account needed'}
+              </span>
             </div>
 
             <form onSubmit={shorten} noValidate>
@@ -597,12 +995,128 @@ function App() {
             )}
 
             <div className="card-footnote">
-              <span className="footnote-dot" /> Free to use <span className="footnote-divider">·</span> Live analytics <span className="footnote-divider">·</span> Custom alias & QR ready
+              <span className="footnote-dot" /> Free to use <span className="footnote-divider">·</span> Live analytics <span className="footnote-divider">·</span> Cloud account sync
             </div>
           </div>
 
-          {/* Recent Links History */}
-          {recentLinks.length > 0 && (
+          {/* Cloud Links Management (Signed In) */}
+          {authSession && (
+            <div className="cloud-links-section" aria-label="My cloud links">
+              <div className="history-header">
+                <div className="history-title">
+                  <Icon name="cloud" size={16} />
+                  <span>My Cloud Links</span>
+                  <span className="history-count">{cloudLinks.length}</span>
+                </div>
+                <button
+                  type="button"
+                  className="history-clear-btn"
+                  onClick={fetchCloudLinks}
+                  disabled={cloudLoading}
+                  title="Refresh cloud links"
+                >
+                  <Icon name="refresh" size={13} /> Refresh
+                </button>
+              </div>
+
+              {cloudLoading && cloudLinks.length === 0 ? (
+                <div className="analytics-loading">
+                  <span className="spinner analytics-spinner" />
+                  <span>Loading your links…</span>
+                </div>
+              ) : cloudLinks.length === 0 ? (
+                <div className="empty-cloud-card">
+                  <p>You haven't shortened any links under this account yet.</p>
+                </div>
+              ) : (
+                <div className="history-list">
+                  {cloudLinks.map((item) => {
+                    const isCopied = historyCopiedCode === item.code;
+                    const shortUrl = `${domain}/${item.code}`;
+                    return (
+                      <div key={item.code} className={`history-item ${item.isPaused ? 'paused' : ''}`}>
+                        <div className="history-item-details">
+                          <div className="history-short">
+                            <a
+                              href={`https://${shortUrl}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="history-code-link"
+                            >
+                              /{item.code}
+                            </a>
+                            {item.isPaused && <span className="paused-pill">Paused</span>}
+                            <span className="click-counter-badge">
+                              {item.totalClicks} {item.totalClicks === 1 ? 'click' : 'clicks'}
+                            </span>
+                            {item.expiresAt && (
+                              <span className="history-expiry">
+                                exp: {formatExpiry(item.expiresAt)}
+                              </span>
+                            )}
+                          </div>
+                          {item.longUrl && (
+                            <div className="history-destination" title={item.longUrl}>
+                              {item.longUrl}
+                            </div>
+                          )}
+                        </div>
+                        <div className="history-item-actions">
+                          <button
+                            type="button"
+                            className="manage-btn"
+                            onClick={() => setEditingLink(item)}
+                            title="Edit destination URL"
+                          >
+                            <Icon name="edit" size={13} />
+                            <span>Edit</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={`manage-btn ${item.isPaused ? 'resume' : ''}`}
+                            onClick={() => togglePauseLink(item.code, item.isPaused)}
+                            title={item.isPaused ? 'Resume link' : 'Pause link'}
+                          >
+                            <Icon name={item.isPaused ? 'play' : 'pause'} size={13} />
+                            <span>{item.isPaused ? 'Resume' : 'Pause'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="history-stats-btn"
+                            onClick={() => setAnalyticsCode(item.code)}
+                            title="View stats"
+                          >
+                            <Icon name="chart" size={13} />
+                            <span>Stats</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={`history-copy-btn ${isCopied ? 'copied' : ''}`}
+                            onClick={() => copyLink(`https://${shortUrl}`, item.code)}
+                            title="Copy link"
+                          >
+                            <Icon name={isCopied ? 'check' : 'copy'} size={14} />
+                            <span>{isCopied ? 'Copied' : 'Copy'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="delete-link-btn"
+                            onClick={() => deleteLink(item.code)}
+                            title="Delete link permanently"
+                          >
+                            <Icon name="trash" size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Anonymous Recent Links History (when not logged in) */}
+          {!authSession && recentLinks.length > 0 && (
             <div className="history-section" aria-label="Recent links history">
               <div className="history-header">
                 <div className="history-title">
@@ -686,15 +1200,15 @@ function App() {
           <article className="benefit">
             <div className="benefit-icon peach"><Icon name="shield" size={19} /></div>
             <div>
-              <h2>Live Analytics</h2>
-              <p>Track clicks, devices, and traffic sources in real time.</p>
+              <h2>Cloud Management</h2>
+              <p>Edit destination URLs, pause, or delete links anytime.</p>
             </div>
           </article>
           <article className="benefit">
             <div className="benefit-icon mint"><Icon name="globe" size={19} /></div>
             <div>
-              <h2>Share anywhere</h2>
-              <p>Scan, copy, and track on your favorite device.</p>
+              <h2>Live Analytics</h2>
+              <p>Track clicks, devices, and traffic sources in real time.</p>
             </div>
           </article>
         </section>
@@ -705,6 +1219,31 @@ function App() {
           <span className="note-line" />
         </section>
       </main>
+
+      {/* Auth Modal */}
+      {showAuthModal && (
+        <AuthModal
+          onClose={() => setShowAuthModal(false)}
+          onAuthSuccess={(session) => {
+            setAuthSession(session);
+          }}
+        />
+      )}
+
+      {/* Edit Link Modal */}
+      {editingLink && (
+        <EditLinkModal
+          link={editingLink}
+          onClose={() => setEditingLink(null)}
+          onUpdated={(updated) => {
+            setCloudLinks((prev) =>
+              prev.map((item) => (item.code === updated.code ? { ...item, longUrl: updated.longUrl } : item))
+            );
+          }}
+          apiBaseUrl={API_BASE_URL}
+          authSession={authSession}
+        />
+      )}
 
       {/* Analytics Modal */}
       {analyticsCode && (
