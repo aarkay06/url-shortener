@@ -33,6 +33,9 @@ function Icon({ name, size = 20, strokeWidth = 1.8 }) {
     external: <><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" x2="21" y1="14" y2="3" /></>,
     history: <><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l4 2" /></>,
     trash: <><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /></>,
+    chart: <><line x1="18" x2="18" y1="20" y2="10" /><line x1="12" x2="12" y1="20" y2="4" /><line x1="6" x2="6" y1="20" y2="14" /></>,
+    refresh: <><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21h5v-5" /></>,
+    x: <><line x1="18" x2="6" y1="6" y2="18" /><line x1="6" x2="18" y1="6" y2="18" /></>,
   };
   return <svg {...shared}>{paths[name] || null}</svg>;
 }
@@ -51,6 +54,195 @@ function formatExpiry(timestampSec) {
   });
 }
 
+function timeAgo(timestampSec) {
+  if (!timestampSec) return 'Never';
+  const diffSec = Math.floor(Date.now() / 1000) - timestampSec;
+  if (diffSec < 60) return 'Just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  return `${diffDays}d ago`;
+}
+
+function AnalyticsModal({ code, onClose, apiBaseUrl }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const loadData = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(`${apiBaseUrl}/links/${code}/analytics`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to load analytics.');
+      }
+      const json = await res.json();
+      setData(json);
+    } catch (err) {
+      setError(err.message || 'Could not fetch stats.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, [code]);
+
+  const deviceTotal = (data?.devices?.desktop || 0) + (data?.devices?.mobile || 0) + (data?.devices?.tablet || 0);
+  const desktopPct = deviceTotal ? Math.round(((data.devices.desktop || 0) / deviceTotal) * 100) : 0;
+  const mobilePct = deviceTotal ? Math.round(((data.devices.mobile || 0) / deviceTotal) * 100) : 0;
+  const tabletPct = deviceTotal ? Math.max(0, 100 - desktopPct - mobilePct) : 0;
+
+  const topReferrers = data?.referrers ? Object.entries(data.referrers).sort((a, b) => b[1] - a[1]) : [];
+  const topCountries = data?.countries ? Object.entries(data.countries).sort((a, b) => b[1] - a[1]) : [];
+
+  return (
+    <div className="analytics-overlay" onClick={onClose} role="dialog" aria-modal="true">
+      <div className="analytics-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="analytics-header">
+          <div className="analytics-title-group">
+            <span className="analytics-eyebrow">
+              <Icon name="chart" size={13} /> LINK ANALYTICS
+            </span>
+            <h3 className="analytics-code-title">/{code}</h3>
+          </div>
+          <div className="analytics-header-actions">
+            <button
+              className="analytics-refresh-btn"
+              onClick={loadData}
+              disabled={loading}
+              title="Refresh stats"
+            >
+              <Icon name="refresh" size={14} />
+            </button>
+            <button
+              className="analytics-close-btn"
+              onClick={onClose}
+              aria-label="Close analytics"
+            >
+              <Icon name="x" size={16} />
+            </button>
+          </div>
+        </div>
+
+        {loading && (
+          <div className="analytics-loading">
+            <span className="spinner analytics-spinner" />
+            <span>Fetching live stats…</span>
+          </div>
+        )}
+
+        {error && (
+          <div className="analytics-error">
+            <p>{error}</p>
+            <button className="analytics-retry-btn" onClick={loadData}>Retry</button>
+          </div>
+        )}
+
+        {data && !loading && (
+          <div className="analytics-body">
+            {/* KPI Cards */}
+            <div className="analytics-metrics-grid">
+              <div className="metric-card primary">
+                <span className="metric-label">TOTAL CLICKS</span>
+                <span className="metric-value">{data.totalClicks.toLocaleString()}</span>
+                <span className="metric-footnote">
+                  {data.lastClickedAt ? `Last active ${timeAgo(data.lastClickedAt)}` : 'No clicks yet'}
+                </span>
+              </div>
+              <div className="metric-card">
+                <span className="metric-label">LINK STATUS</span>
+                <div className="metric-status">
+                  <span className={`status-pill ${data.isExpired ? 'expired' : 'active'}`}>
+                    {data.isExpired ? 'Expired' : 'Active'}
+                  </span>
+                </div>
+                <span className="metric-footnote">
+                  {data.expiresAt ? `Expires ${formatExpiry(data.expiresAt)}` : 'No expiration set'}
+                </span>
+              </div>
+            </div>
+
+            {/* Target URL Info */}
+            {data.longUrl && (
+              <div className="analytics-target-box">
+                <span className="target-label">Destination URL:</span>
+                <a href={data.longUrl} target="_blank" rel="noreferrer" className="target-url">
+                  <span>{data.longUrl}</span>
+                  <Icon name="external" size={12} />
+                </a>
+              </div>
+            )}
+
+            {/* Device Distribution */}
+            <div className="analytics-section">
+              <div className="section-title-row">
+                <span className="section-title">Device Breakdown</span>
+                <span className="section-total">{deviceTotal} tracked</span>
+              </div>
+              {deviceTotal > 0 ? (
+                <>
+                  <div className="segmented-bar">
+                    {desktopPct > 0 && <div className="bar-segment desktop" style={{ width: `${desktopPct}%` }} title={`Desktop: ${desktopPct}%`} />}
+                    {mobilePct > 0 && <div className="bar-segment mobile" style={{ width: `${mobilePct}%` }} title={`Mobile: ${mobilePct}%`} />}
+                    {tabletPct > 0 && <div className="bar-segment tablet" style={{ width: `${tabletPct}%` }} title={`Tablet: ${tabletPct}%`} />}
+                  </div>
+                  <div className="device-legend">
+                    <span className="legend-item"><span className="legend-dot desktop" /> Desktop {desktopPct}% ({data.devices.desktop || 0})</span>
+                    <span className="legend-item"><span className="legend-dot mobile" /> Mobile {mobilePct}% ({data.devices.mobile || 0})</span>
+                    <span className="legend-item"><span className="legend-dot tablet" /> Tablet {tabletPct}% ({data.devices.tablet || 0})</span>
+                  </div>
+                </>
+              ) : (
+                <p className="empty-hint">Click breakdown will appear here once visitors open your link.</p>
+              )}
+            </div>
+
+            {/* Top Referrers */}
+            <div className="analytics-section">
+              <span className="section-title">Top Referral Sources</span>
+              {topReferrers.length > 0 ? (
+                <div className="referrers-list">
+                  {topReferrers.map(([source, count]) => (
+                    <div key={source} className="referrer-row">
+                      <span className="referrer-name">{source}</span>
+                      <span className="referrer-count">{count} {count === 1 ? 'click' : 'clicks'}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-hint">No referral sources recorded yet.</p>
+              )}
+            </div>
+
+            {/* Top Countries */}
+            <div className="analytics-section">
+              <span className="section-title">Geographic Distribution</span>
+              {topCountries.length > 0 ? (
+                <div className="countries-grid">
+                  {topCountries.map(([country, count]) => (
+                    <div key={country} className="country-pill">
+                      <span className="country-code">{country}</span>
+                      <span className="country-count">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-hint">Regional telemetry will populate as visitors browse.</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [url, setUrl] = useState('');
   const [customSlug, setCustomSlug] = useState('');
@@ -63,6 +255,9 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [historyCopiedCode, setHistoryCopiedCode] = useState(null);
+
+  // Active analytics code for modal
+  const [analyticsCode, setAnalyticsCode] = useState(null);
 
   // Local storage history of created links
   const [recentLinks, setRecentLinks] = useState(() => {
@@ -342,6 +537,15 @@ function App() {
                       {copied ? 'Copied!' : 'Copy'}
                     </button>
                     <button
+                      className="analytics-btn"
+                      type="button"
+                      onClick={() => setAnalyticsCode(result.code)}
+                      title="View real-time analytics"
+                    >
+                      <Icon name="chart" size={15} />
+                      <span>Stats</span>
+                    </button>
+                    <button
                       className={`qr-toggle-btn ${showQr ? 'active' : ''}`}
                       type="button"
                       onClick={() => setShowQr(!showQr)}
@@ -393,7 +597,7 @@ function App() {
             )}
 
             <div className="card-footnote">
-              <span className="footnote-dot" /> Free to use <span className="footnote-divider">·</span> No account needed <span className="footnote-divider">·</span> Custom alias & QR ready
+              <span className="footnote-dot" /> Free to use <span className="footnote-divider">·</span> Live analytics <span className="footnote-divider">·</span> Custom alias & QR ready
             </div>
           </div>
 
@@ -441,6 +645,15 @@ function App() {
                       <div className="history-item-actions">
                         <button
                           type="button"
+                          className="history-stats-btn"
+                          onClick={() => setAnalyticsCode(item.code)}
+                          title="View stats"
+                        >
+                          <Icon name="chart" size={13} />
+                          <span>Stats</span>
+                        </button>
+                        <button
+                          type="button"
                           className={`history-copy-btn ${isCopied ? 'copied' : ''}`}
                           onClick={() => copyLink(item.shortUrl, item.code)}
                           title="Copy link"
@@ -473,8 +686,8 @@ function App() {
           <article className="benefit">
             <div className="benefit-icon peach"><Icon name="shield" size={19} /></div>
             <div>
-              <h2>Flexible Expiry</h2>
-              <p>Keep links active for 7 days up to a full year.</p>
+              <h2>Live Analytics</h2>
+              <p>Track clicks, devices, and traffic sources in real time.</p>
             </div>
           </article>
           <article className="benefit">
@@ -492,6 +705,15 @@ function App() {
           <span className="note-line" />
         </section>
       </main>
+
+      {/* Analytics Modal */}
+      {analyticsCode && (
+        <AnalyticsModal
+          code={analyticsCode}
+          onClose={() => setAnalyticsCode(null)}
+          apiBaseUrl={API_BASE_URL}
+        />
+      )}
 
       <footer className="footer">
         <a className="footer-brand" href="#top"><BrandMark /> snip.</a>

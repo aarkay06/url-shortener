@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { getCodeFromEvent, isValidCode } from "./shared.js";
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -13,6 +13,99 @@ const response = (statusCode, message) => ({
   },
   body: message,
 });
+
+function parseDevice(userAgent = "") {
+  const ua = userAgent.toLowerCase();
+  if (ua.includes("ipad") || ua.includes("tablet")) return "tablet";
+  if (ua.includes("mobile") || ua.includes("android") || ua.includes("iphone")) return "mobile";
+  return "desktop";
+}
+
+function parseReferrer(referrer = "") {
+  if (!referrer || typeof referrer !== "string") return "direct";
+  try {
+    const url = new URL(referrer);
+    let host = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (host.includes("google")) return "google";
+    if (host.includes("twitter") || host.includes("t.co") || host.includes("x.com")) return "x/twitter";
+    if (host.includes("linkedin") || host.includes("lnkd.in")) return "linkedin";
+    if (host.includes("facebook") || host.includes("fb.me")) return "facebook";
+    if (host.includes("reddit")) return "reddit";
+    if (host.includes("instagram")) return "instagram";
+    if (host.includes("youtube") || host.includes("youtu.be")) return "youtube";
+    if (host.includes("github")) return "github";
+    return host.replace(/[^a-zA-Z0-9.-]/g, "_").slice(0, 32) || "other";
+  } catch {
+    return "other";
+  }
+}
+
+function parseCountry(headers = {}) {
+  const country = headers["cloudfront-viewer-country"];
+  if (typeof country === "string" && /^[A-Z]{2}$/i.test(country)) {
+    return country.toUpperCase();
+  }
+  return "OTHER";
+}
+
+async function recordClick(code, event) {
+  const headers = event.headers || {};
+  const userAgent = headers["user-agent"] || "";
+  const referrerHeader = headers["referer"] || headers["referrer"] || "";
+  const device = parseDevice(userAgent);
+  const referrer = parseReferrer(referrerHeader);
+  const country = parseCountry(headers);
+  const now = Math.floor(Date.now() / 1000);
+
+  try {
+    await db.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { code },
+      UpdateExpression: "SET lastClickedAt = :now, devices.#dev = if_not_exists(devices.#dev, :zero) + :one, referrers.#ref = if_not_exists(referrers.#ref, :zero) + :one, countries.#cnt = if_not_exists(countries.#cnt, :zero) + :one ADD clickCount :one",
+      ExpressionAttributeNames: {
+        "#dev": device,
+        "#ref": referrer,
+        "#cnt": country,
+      },
+      ExpressionAttributeValues: {
+        ":now": now,
+        ":zero": 0,
+        ":one": 1,
+      },
+    }));
+  } catch (err) {
+    // Fallback: If map structures were not initialized on earlier items
+    try {
+      await db.send(new UpdateCommand({
+        TableName: tableName,
+        Key: { code },
+        UpdateExpression: "SET lastClickedAt = :now, devices = if_not_exists(devices, :emptyMap), referrers = if_not_exists(referrers, :emptyMap), countries = if_not_exists(countries, :emptyMap) ADD clickCount :one",
+        ExpressionAttributeValues: {
+          ":now": now,
+          ":one": 1,
+          ":emptyMap": {},
+        },
+      }));
+
+      await db.send(new UpdateCommand({
+        TableName: tableName,
+        Key: { code },
+        UpdateExpression: "SET devices.#dev = if_not_exists(devices.#dev, :zero) + :one, referrers.#ref = if_not_exists(referrers.#ref, :zero) + :one, countries.#cnt = if_not_exists(countries.#cnt, :zero) + :one",
+        ExpressionAttributeNames: {
+          "#dev": device,
+          "#ref": referrer,
+          "#cnt": country,
+        },
+        ExpressionAttributeValues: {
+          ":zero": 0,
+          ":one": 1,
+        },
+      }));
+    } catch (fallbackError) {
+      console.error("Failed to record click telemetry", fallbackError);
+    }
+  }
+}
 
 export const handler = async (event) => {
   if (!tableName) {
@@ -50,6 +143,9 @@ export const handler = async (event) => {
       console.error("Stored destination uses a disallowed protocol", { code });
       return response(500, "Stored link is invalid");
     }
+
+    // Record click analytics asynchronously with safe catch
+    await recordClick(code, event);
 
     return {
       statusCode: 302,

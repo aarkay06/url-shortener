@@ -115,7 +115,17 @@ export const handler = async (event) => {
     try {
       await db.send(new PutCommand({
         TableName: tableName,
-        Item: { code, longUrl, createdAt: now, expiresAt, isCustom: true },
+        Item: {
+          code,
+          longUrl,
+          createdAt: now,
+          expiresAt,
+          isCustom: true,
+          clickCount: 0,
+          devices: {},
+          referrers: {},
+          countries: {},
+        },
         ConditionExpression: "attribute_not_exists(#code)",
         ExpressionAttributeNames: { "#code": "code" },
       }));
@@ -143,7 +153,16 @@ export const handler = async (event) => {
     try {
       await db.send(new PutCommand({
         TableName: tableName,
-        Item: { code, longUrl, createdAt: now, expiresAt },
+        Item: {
+          code,
+          longUrl,
+          createdAt: now,
+          expiresAt,
+          clickCount: 0,
+          devices: {},
+          referrers: {},
+          countries: {},
+        },
         ConditionExpression: "attribute_not_exists(#code)",
         ExpressionAttributeNames: { "#code": "code" },
       }));

@@ -86,7 +86,7 @@ Resources:
       CodeUri: .
       Handler: src/redirectLink.handler
       Policies:
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref LinksTable
       Events:
         RedirectLink:
@@ -94,6 +94,22 @@ Resources:
           Properties:
             ApiId: !Ref ShortenerApi
             Path: /{code}
+            Method: GET
+
+  GetAnalyticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/getAnalytics.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LinksTable
+      Events:
+        GetAnalytics:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ShortenerApi
+            Path: /links/{code}/analytics
             Method: GET
 
 Outputs:
