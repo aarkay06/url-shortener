@@ -6,7 +6,7 @@
       "destination": "https://3cdtb5v30c.execute-api.ap-south-1.amazonaws.com/:path*"
     },
     {
-      "source": "/:code([A-Za-z0-9_-]{8})",
+      "source": "/:code([A-Za-z0-9_-]{3,32})",
       "destination": "https://3cdtb5v30c.execute-api.ap-south-1.amazonaws.com/:code"
     },
     {
